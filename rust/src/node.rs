@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
 use p2panda_core::Hash;
 use p2panda_net::iroh_mdns::MdnsDiscoveryMode;
+use p2panda_net::gossip::GossipHandle;
 use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip, MdnsDiscovery, TopicId};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Network identifier for Panda Playground.
 fn network_id() -> Hash {
@@ -34,8 +36,6 @@ pub enum NodeError {
 }
 
 /// The Panda Playground p2panda node.
-///
-/// Manages gossip-based pub/sub for ephemeral messages between nearby devices.
 pub struct Node {
     inner: Arc<RwLock<Option<NodeInner>>>,
 }
@@ -46,6 +46,25 @@ struct NodeInner {
     _discovery: Discovery,
     gossip: Gossip,
     public_key_hex: String,
+    /// Cache of gossip stream handles — one per topic, reused for both publish and subscribe.
+    streams: Mutex<HashMap<TopicId, GossipHandle>>,
+}
+
+impl NodeInner {
+    /// Get or create a gossip stream for a topic.
+    async fn get_stream(&self, topic: TopicId) -> Result<GossipHandle, NodeError> {
+        let mut streams = self.streams.lock().await;
+        if let Some(handle) = streams.get(&topic) {
+            return Ok(handle.clone());
+        }
+        let handle = self
+            .gossip
+            .stream(topic)
+            .await
+            .map_err(|e| NodeError::Network(format!("gossip stream: {e}")))?;
+        streams.insert(topic, handle.clone());
+        Ok(handle)
+    }
 }
 
 impl Node {
@@ -99,6 +118,7 @@ impl Node {
             _discovery: discovery,
             gossip,
             public_key_hex: pk,
+            streams: Mutex::new(HashMap::new()),
         });
 
         log::info!("Panda Playground node started");
@@ -111,11 +131,7 @@ impl Node {
         let inner = inner.as_ref().ok_or(NodeError::NotRunning)?;
 
         let topic = topic_from_name(topic_name);
-        let stream = inner
-            .gossip
-            .stream(topic)
-            .await
-            .map_err(|e| NodeError::Network(format!("gossip stream: {e}")))?;
+        let stream = inner.get_stream(topic).await?;
 
         stream
             .publish(message)
@@ -125,7 +141,7 @@ impl Node {
         Ok(())
     }
 
-    /// Subscribe to a named topic. Calls the provided function for each received message.
+    /// Subscribe to a named topic. Returns a receiver for incoming messages.
     pub async fn subscribe(
         &self,
         topic_name: &str,
@@ -134,11 +150,7 @@ impl Node {
         let inner = inner.as_ref().ok_or(NodeError::NotRunning)?;
 
         let topic = topic_from_name(topic_name);
-        let stream = inner
-            .gossip
-            .stream(topic)
-            .await
-            .map_err(|e| NodeError::Network(format!("gossip stream: {e}")))?;
+        let stream = inner.get_stream(topic).await?;
 
         let mut rx = stream.subscribe();
         let (tx, out_rx) = tokio::sync::mpsc::channel(256);
