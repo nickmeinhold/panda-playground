@@ -3,9 +3,11 @@
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
+use flutter_rust_bridge::frb;
 use log::LevelFilter;
 use tokio::runtime::Runtime;
 
+use crate::frb_generated::StreamSink;
 use crate::node::Node;
 
 static NODE: OnceLock<Node> = OnceLock::new();
@@ -71,6 +73,32 @@ pub fn send_message(message: String) -> Result<()> {
 
     rt().block_on(node.publish("chat", payload.into_bytes()))
         .map_err(|e| anyhow!("{e}"))?;
+
+    Ok(())
+}
+
+/// Subscribe to incoming chat messages from nearby devices.
+///
+/// Messages arrive as "sender_id:message_text" strings via the StreamSink.
+/// This function blocks the calling thread and streams messages until the
+/// node shuts down or the sink is closed.
+pub fn subscribe_chat(sink: StreamSink<String>) -> Result<()> {
+    let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
+
+    let mut rx = rt()
+        .block_on(node.subscribe("chat"))
+        .map_err(|e| anyhow!("{e}"))?;
+
+    // Spawn a task on the runtime to forward messages to the Dart sink
+    rt().spawn(async move {
+        while let Some(bytes) = rx.recv().await {
+            if let Ok(message) = String::from_utf8(bytes) {
+                if sink.add(message).is_err() {
+                    break; // Sink closed, stop listening
+                }
+            }
+        }
+    });
 
     Ok(())
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:panda_playground/src/rust/api/chat.dart';
 import 'package:panda_playground/src/rust/frb_generated.dart';
@@ -36,6 +38,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final List<ChatMessage> _messages = [];
   final ScrollController _scrollController = ScrollController();
+  StreamSubscription<String>? _chatSubscription;
   String? _nodeId;
   bool _starting = true;
   String? _error;
@@ -57,6 +60,27 @@ class _ChatScreenState extends State<ChatScreen> {
           text: 'Node started. You are $id. Waiting for pandas nearby...',
           isSystem: true,
         ));
+      });
+
+      // Subscribe to incoming messages from other devices
+      _chatSubscription = subscribeChat().listen((raw) {
+        // Messages arrive as "sender_id:message_text"
+        final colonIndex = raw.indexOf(':');
+        if (colonIndex == -1) return;
+
+        final sender = raw.substring(0, colonIndex);
+        final text = raw.substring(colonIndex + 1);
+
+        // Skip our own messages (we already show them locally)
+        if (sender == _nodeId) return;
+
+        setState(() {
+          _messages.add(ChatMessage(
+            sender: sender,
+            text: text,
+          ));
+        });
+        _scrollToBottom();
       });
     } catch (e) {
       setState(() {
@@ -108,6 +132,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _chatSubscription?.cancel();
     _controller.dispose();
     _scrollController.dispose();
     stopNode();
