@@ -21,5 +21,17 @@ Future<void> sendMessage({required String message}) =>
 Stream<String> subscribeChat() =>
     RustLib.instance.api.crateApiChatSubscribeChat();
 
+/// Send a sketch stroke. Broadcast to all nearby devices via gossip.
+///
+/// Payload format: "sender_id:color:x1,y1;x2,y2;..."
+Future<void> sendSketch({required String stroke}) =>
+    RustLib.instance.api.crateApiChatSendSketch(stroke: stroke);
+
+/// Subscribe to incoming sketch strokes from nearby devices.
+///
+/// Strokes arrive as "sender_id:color:x1,y1;x2,y2;..." strings.
+Stream<String> subscribeSketch() =>
+    RustLib.instance.api.crateApiChatSubscribeSketch();
+
 /// Shut down the node.
 Future<void> stopNode() => RustLib.instance.api.crateApiChatStopNode();

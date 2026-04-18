@@ -149,6 +149,65 @@ pub fn subscribe_chat(sink: StreamSink<String>) -> Result<()> {
         .map_err(|_| anyhow!("subscribe task failed"))?
 }
 
+/// Send a sketch stroke. Broadcast to all nearby devices via gossip.
+///
+/// Payload format: "sender_id:color:x1,y1;x2,y2;..."
+pub fn send_sketch(stroke: String) -> Result<()> {
+    log::info!("[api] send_sketch called ({} bytes)", stroke.len());
+    let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
+
+    let (tx, rx) = oneshot::channel();
+    let node_ref = node;
+    rt().spawn(async move {
+        let result = async {
+            let short_id = node_ref.short_id().await?;
+            let payload = format!("{short_id}:{stroke}");
+            node_ref.publish("sketch", payload.into_bytes()).await?;
+            Ok::<_, crate::node::NodeError>(())
+        }
+        .await;
+        let _ = tx.send(result);
+    });
+
+    rx.blocking_recv()
+        .map_err(|_| anyhow!("send task failed"))?
+        .map_err(|e| anyhow!("{e}"))
+}
+
+/// Subscribe to incoming sketch strokes from nearby devices.
+///
+/// Strokes arrive as "sender_id:color:x1,y1;x2,y2;..." strings.
+pub fn subscribe_sketch(sink: StreamSink<String>) -> Result<()> {
+    log::info!("[api] subscribe_sketch called");
+    let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
+
+    let (tx, rx) = oneshot::channel();
+    let node_ref = node;
+    rt().spawn(async move {
+        match node_ref.subscribe("sketch").await {
+            Ok(mut receiver) => {
+                log::info!("[api] sketch subscription established");
+                let _ = tx.send(Ok(()));
+                while let Some(bytes) = receiver.recv().await {
+                    if let Ok(message) = String::from_utf8(bytes) {
+                        log::debug!("[api] sketch stroke received ({} bytes)", message.len());
+                        if sink.add(message).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("[api] sketch subscribe failed: {e}");
+                let _ = tx.send(Err(anyhow!("{e}")));
+            }
+        }
+    });
+
+    rx.blocking_recv()
+        .map_err(|_| anyhow!("subscribe task failed"))?
+}
+
 /// Shut down the node.
 pub fn stop_node() -> Result<()> {
     let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
