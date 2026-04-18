@@ -42,4 +42,6 @@ A new Flutter FFI plugin project.
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
     'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/librust_lib_panda_playground.a',
   }
+  # Frameworks required by iroh networking (used by p2panda-net)
+  s.frameworks = 'Network', 'SystemConfiguration', 'Security'
 end

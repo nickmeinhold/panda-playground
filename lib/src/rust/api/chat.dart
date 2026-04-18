@@ -18,8 +18,6 @@ Future<void> sendMessage({required String message}) =>
 /// Subscribe to incoming chat messages from nearby devices.
 ///
 /// Messages arrive as "sender_id:message_text" strings via the StreamSink.
-/// This function blocks the calling thread and streams messages until the
-/// node shuts down or the sink is closed.
 Stream<String> subscribeChat() =>
     RustLib.instance.api.crateApiChatSubscribeChat();
 

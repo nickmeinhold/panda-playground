@@ -2960,31 +2960,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "panda_playground"
-version = "0.1.0"
-dependencies = [
- "android_logger 0.13.3",
- "anyhow",
- "chrono",
- "ciborium",
- "flutter_rust_bridge",
- "futures-util",
- "hex",
- "log",
- "oslog",
- "p2panda-core",
- "p2panda-discovery",
- "p2panda-net",
- "p2panda-store",
- "p2panda-stream",
- "p2panda-sync",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
 name = "papaya"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3624,6 +3599,31 @@ dependencies = [
  "spki 0.7.3",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rust_lib_panda_playground"
+version = "0.1.0"
+dependencies = [
+ "android_logger 0.13.3",
+ "anyhow",
+ "chrono",
+ "ciborium",
+ "flutter_rust_bridge",
+ "futures-util",
+ "hex",
+ "log",
+ "oslog",
+ "p2panda-core",
+ "p2panda-discovery",
+ "p2panda-net",
+ "p2panda-store",
+ "p2panda-stream",
+ "p2panda-sync",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

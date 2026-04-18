@@ -3,9 +3,9 @@
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
-use flutter_rust_bridge::frb;
 use log::LevelFilter;
 use tokio::runtime::Runtime;
+use tokio::sync::oneshot;
 
 use crate::frb_generated::StreamSink;
 use crate::node::Node;
@@ -16,6 +16,7 @@ static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 fn rt() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .expect("failed to create tokio runtime")
@@ -32,7 +33,7 @@ fn init_logging() {
                 .with_max_level(LevelFilter::Trace)
                 .with_filter(
                     FilterBuilder::new()
-                        .filter(Some("panda_playground"), LevelFilter::Debug)
+                        .filter(Some("rust_lib_panda_playground"), LevelFilter::Debug)
                         .filter(Some("p2panda"), LevelFilter::Info)
                         .filter(Some("iroh"), LevelFilter::Warn)
                         .build(),
@@ -52,9 +53,25 @@ fn init_logging() {
 /// Start the p2panda node. Returns this node's short ID (first 8 chars of public key).
 pub fn start_node() -> Result<String> {
     init_logging();
+    log::info!("Starting Panda Playground node...");
 
     let node = Node::new();
-    let public_key = rt().block_on(node.start()).map_err(|e| anyhow!("{e}"))?;
+
+    // Use a oneshot channel to get the result from the async task
+    let (tx, rx) = oneshot::channel();
+
+    rt().spawn(async move {
+        let result = node.start().await;
+        // We need to send both the node and the result back
+        let _ = tx.send((node, result));
+    });
+
+    // Block waiting for the result
+    let (node, result) = rx
+        .blocking_recv()
+        .map_err(|_| anyhow!("node startup task failed"))?;
+
+    let public_key = result.map_err(|e| anyhow!("node start failed: {e}"))?;
     let short_id = public_key[..8].to_string();
 
     NODE.set(node)
@@ -68,44 +85,67 @@ pub fn start_node() -> Result<String> {
 pub fn send_message(message: String) -> Result<()> {
     let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
 
-    let short_id = rt().block_on(node.short_id()).map_err(|e| anyhow!("{e}"))?;
-    let payload = format!("{short_id}:{message}");
+    let (tx, rx) = oneshot::channel();
+    let short_id_fut = {
+        let node = node;
+        async move {
+            let short_id = node.short_id().await?;
+            let payload = format!("{short_id}:{message}");
+            node.publish("chat", payload.into_bytes()).await?;
+            Ok::<_, crate::node::NodeError>(())
+        }
+    };
 
-    rt().block_on(node.publish("chat", payload.into_bytes()))
-        .map_err(|e| anyhow!("{e}"))?;
+    rt().spawn(async move {
+        let _ = tx.send(short_id_fut.await);
+    });
 
-    Ok(())
+    rx.blocking_recv()
+        .map_err(|_| anyhow!("send task failed"))?
+        .map_err(|e| anyhow!("{e}"))
 }
 
 /// Subscribe to incoming chat messages from nearby devices.
 ///
 /// Messages arrive as "sender_id:message_text" strings via the StreamSink.
-/// This function blocks the calling thread and streams messages until the
-/// node shuts down or the sink is closed.
 pub fn subscribe_chat(sink: StreamSink<String>) -> Result<()> {
     let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
 
-    let mut rx = rt()
-        .block_on(node.subscribe("chat"))
-        .map_err(|e| anyhow!("{e}"))?;
+    let (tx, rx) = oneshot::channel();
 
-    // Spawn a task on the runtime to forward messages to the Dart sink
+    let node_ref = node;
     rt().spawn(async move {
-        while let Some(bytes) = rx.recv().await {
-            if let Ok(message) = String::from_utf8(bytes) {
-                if sink.add(message).is_err() {
-                    break; // Sink closed, stop listening
+        match node_ref.subscribe("chat").await {
+            Ok(mut receiver) => {
+                let _ = tx.send(Ok(()));
+                while let Some(bytes) = receiver.recv().await {
+                    if let Ok(message) = String::from_utf8(bytes) {
+                        if sink.add(message).is_err() {
+                            break;
+                        }
+                    }
                 }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(anyhow!("{e}")));
             }
         }
     });
 
-    Ok(())
+    rx.blocking_recv()
+        .map_err(|_| anyhow!("subscribe task failed"))?
 }
 
 /// Shut down the node.
 pub fn stop_node() -> Result<()> {
     let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
-    rt().block_on(node.shutdown()).map_err(|e| anyhow!("{e}"))?;
-    Ok(())
+
+    let (tx, rx) = oneshot::channel();
+    rt().spawn(async move {
+        let _ = tx.send(node.shutdown().await);
+    });
+
+    rx.blocking_recv()
+        .map_err(|_| anyhow!("shutdown task failed"))?
+        .map_err(|e| anyhow!("{e}"))
 }
