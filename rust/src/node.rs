@@ -53,10 +53,13 @@ struct NodeInner {
 impl NodeInner {
     /// Get or create a gossip stream for a topic.
     async fn get_stream(&self, topic: TopicId) -> Result<GossipHandle, NodeError> {
+        let topic_hex = format!("{topic:?}");
         let mut streams = self.streams.lock().await;
         if let Some(handle) = streams.get(&topic) {
+            log::debug!("[gossip] reusing cached handle for topic {topic_hex}");
             return Ok(handle.clone());
         }
+        log::info!("[gossip] creating new handle for topic {topic_hex}");
         let handle = self
             .gossip
             .stream(topic)
@@ -133,11 +136,16 @@ impl Node {
         let topic = topic_from_name(topic_name);
         let stream = inner.get_stream(topic).await?;
 
+        log::info!(
+            "[gossip] publishing {} bytes to topic '{topic_name}'",
+            message.len()
+        );
         stream
             .publish(message)
             .await
             .map_err(|e| NodeError::Network(format!("publish: {e}")))?;
 
+        log::debug!("[gossip] publish succeeded on '{topic_name}'");
         Ok(())
     }
 
@@ -155,10 +163,29 @@ impl Node {
         let mut rx = stream.subscribe();
         let (tx, out_rx) = tokio::sync::mpsc::channel(256);
 
+        let name = topic_name.to_string();
+        log::info!("[gossip] subscription started for topic '{name}'");
+
         tokio::spawn(async move {
-            while let Some(Ok(bytes)) = rx.next().await {
-                if tx.send(bytes).await.is_err() {
-                    break;
+            loop {
+                match rx.next().await {
+                    Some(Ok(bytes)) => {
+                        log::info!(
+                            "[gossip] received {} bytes on topic '{name}'",
+                            bytes.len()
+                        );
+                        if tx.send(bytes).await.is_err() {
+                            log::warn!("[gossip] subscriber channel closed for '{name}'");
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        log::warn!("[gossip] receive error on '{name}': {e}");
+                    }
+                    None => {
+                        log::warn!("[gossip] subscription stream ended for '{name}'");
+                        break;
+                    }
                 }
             }
         });

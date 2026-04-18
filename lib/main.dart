@@ -1,8 +1,14 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
 import 'package:panda_playground/src/rust/api/chat.dart';
 import 'package:panda_playground/src/rust/frb_generated.dart';
+
+void _log(String msg) {
+  developer.log(msg, name: 'panda');
+  debugPrint('[panda] $msg');
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -51,7 +57,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _initNode() async {
     try {
+      _log('calling startNode()...');
       final id = await startNode();
+      _log('node started with ID: $id');
       setState(() {
         _nodeId = id;
         _starting = false;
@@ -63,26 +71,41 @@ class _ChatScreenState extends State<ChatScreen> {
       });
 
       // Subscribe to incoming messages from other devices
-      _chatSubscription = subscribeChat().listen((raw) {
-        // Messages arrive as "sender_id:message_text"
-        final colonIndex = raw.indexOf(':');
-        if (colonIndex == -1) return;
+      _log('calling subscribeChat()...');
+      _chatSubscription = subscribeChat().listen(
+        (raw) {
+          _log('stream event: "$raw"');
+          // Messages arrive as "sender_id:message_text"
+          final colonIndex = raw.indexOf(':');
+          if (colonIndex == -1) {
+            _log('ignoring malformed message (no colon)');
+            return;
+          }
 
-        final sender = raw.substring(0, colonIndex);
-        final text = raw.substring(colonIndex + 1);
+          final sender = raw.substring(0, colonIndex);
+          final text = raw.substring(colonIndex + 1);
 
-        // Skip our own messages (we already show them locally)
-        if (sender == _nodeId) return;
+          // Skip our own messages (we already show them locally)
+          if (sender == _nodeId) {
+            _log('ignoring self-message from $sender');
+            return;
+          }
 
-        setState(() {
-          _messages.add(ChatMessage(
-            sender: sender,
-            text: text,
-          ));
-        });
-        _scrollToBottom();
-      });
+          _log('displaying message from $sender: "$text"');
+          setState(() {
+            _messages.add(ChatMessage(
+              sender: sender,
+              text: text,
+            ));
+          });
+          _scrollToBottom();
+        },
+        onError: (e) => _log('stream error: $e'),
+        onDone: () => _log('stream closed'),
+      );
+      _log('subscribeChat() listener attached');
     } catch (e) {
+      _log('init error: $e');
       setState(() {
         _error = e.toString();
         _starting = false;
@@ -106,8 +129,11 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
 
     try {
+      _log('calling sendMessage("$text")...');
       await sendMessage(message: text);
+      _log('sendMessage completed');
     } catch (e) {
+      _log('sendMessage error: $e');
       setState(() {
         _messages.add(ChatMessage(
           sender: 'system',

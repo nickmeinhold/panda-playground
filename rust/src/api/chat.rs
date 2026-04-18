@@ -53,7 +53,7 @@ fn init_logging() {
 /// Start the p2panda node. Returns this node's short ID (first 8 chars of public key).
 pub fn start_node() -> Result<String> {
     init_logging();
-    log::info!("Starting Panda Playground node...");
+    log::info!("[api] start_node called");
 
     let node = Node::new();
 
@@ -77,12 +77,13 @@ pub fn start_node() -> Result<String> {
     NODE.set(node)
         .map_err(|_| anyhow!("node already started"))?;
 
-    log::info!("Node started with ID: {short_id}");
+    log::info!("[api] node started — ID: {short_id}, full key: {public_key}");
     Ok(short_id)
 }
 
 /// Send a chat message. Broadcast to all nearby devices via gossip.
 pub fn send_message(message: String) -> Result<()> {
+    log::info!("[api] send_message called: '{message}'");
     let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
 
     let (tx, rx) = oneshot::channel();
@@ -91,6 +92,7 @@ pub fn send_message(message: String) -> Result<()> {
         async move {
             let short_id = node.short_id().await?;
             let payload = format!("{short_id}:{message}");
+            log::info!("[api] sending payload: '{payload}'");
             node.publish("chat", payload.into_bytes()).await?;
             Ok::<_, crate::node::NodeError>(())
         }
@@ -109,6 +111,7 @@ pub fn send_message(message: String) -> Result<()> {
 ///
 /// Messages arrive as "sender_id:message_text" strings via the StreamSink.
 pub fn subscribe_chat(sink: StreamSink<String>) -> Result<()> {
+    log::info!("[api] subscribe_chat called");
     let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
 
     let (tx, rx) = oneshot::channel();
@@ -117,16 +120,26 @@ pub fn subscribe_chat(sink: StreamSink<String>) -> Result<()> {
     rt().spawn(async move {
         match node_ref.subscribe("chat").await {
             Ok(mut receiver) => {
+                log::info!("[api] chat subscription established, waiting for messages...");
                 let _ = tx.send(Ok(()));
                 while let Some(bytes) = receiver.recv().await {
-                    if let Ok(message) = String::from_utf8(bytes) {
-                        if sink.add(message).is_err() {
-                            break;
+                    match String::from_utf8(bytes) {
+                        Ok(message) => {
+                            log::info!("[api] forwarding to Dart: '{message}'");
+                            if sink.add(message).is_err() {
+                                log::warn!("[api] StreamSink closed, ending subscription");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("[api] received non-UTF8 message: {e}");
                         }
                     }
                 }
+                log::warn!("[api] chat receiver ended (mpsc channel closed)");
             }
             Err(e) => {
+                log::error!("[api] subscribe failed: {e}");
                 let _ = tx.send(Err(anyhow!("{e}")));
             }
         }
