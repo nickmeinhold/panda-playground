@@ -33,3 +33,12 @@ android_logger = "0.13.1"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 oslog = "0.2"
+
+# Local p2panda patch for mDNS fix
+[patch."https://github.com/p2panda/p2panda"]
+p2panda-core = { path = "/Users/nick/git/experiments/p2panda-local/p2panda-core" }
+p2panda-discovery = { path = "/Users/nick/git/experiments/p2panda-local/p2panda-discovery" }
+p2panda-net = { path = "/Users/nick/git/experiments/p2panda-local/p2panda-net" }
+p2panda-store = { path = "/Users/nick/git/experiments/p2panda-local/p2panda-store" }
+p2panda-stream = { path = "/Users/nick/git/experiments/p2panda-local/p2panda-stream" }
+p2panda-sync = { path = "/Users/nick/git/experiments/p2panda-local/p2panda-sync" }
