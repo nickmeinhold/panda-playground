@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:panda_playground/sketch_screen.dart';
 import 'package:panda_playground/src/rust/api/chat.dart';
 import 'package:panda_playground/src/rust/frb_generated.dart';
@@ -55,8 +57,9 @@ class _PlaygroundHomeState extends State<PlaygroundHome> {
 
   Future<void> _initNode() async {
     try {
-      _log('calling startNode()...');
-      final id = await startNode();
+      final dir = await getApplicationSupportDirectory();
+      _log('calling startNode(dataDir: ${dir.path})...');
+      final id = await startNode(dataDir: dir.path);
       _log('node started with ID: $id');
       setState(() {
         _nodeId = id;
@@ -68,6 +71,69 @@ class _PlaygroundHomeState extends State<PlaygroundHome> {
         _error = e.toString();
         _starting = false;
       });
+    }
+  }
+
+  Future<void> _copyNodeId() async {
+    try {
+      final fullId = await getFullNodeId();
+      await Clipboard.setData(ClipboardData(text: fullId));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Node ID copied ($fullId)')),
+        );
+      }
+      _log('copied full node ID: $fullId');
+    } catch (e) {
+      _log('copy node ID error: $e');
+    }
+  }
+
+  Future<void> _showAddPeerDialog() async {
+    final controller = TextEditingController();
+    final nodeId = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Connect to Peer'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: 'Paste peer node ID (64 hex chars)',
+            border: OutlineInputBorder(),
+          ),
+          maxLines: 2,
+          style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+
+    if (nodeId != null && nodeId.isNotEmpty) {
+      try {
+        await addPeer(nodeId: nodeId);
+        _log('peer added: ${nodeId.substring(0, 8)}');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Peer added: ${nodeId.substring(0, 8)}...')),
+          );
+        }
+      } catch (e) {
+        _log('add peer error: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to add peer: $e')),
+          );
+        }
+      }
     }
   }
 
@@ -125,6 +191,18 @@ class _PlaygroundHomeState extends State<PlaygroundHome> {
               ),
             ],
           ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.copy),
+              tooltip: 'Copy Node ID',
+              onPressed: _copyNodeId,
+            ),
+            IconButton(
+              icon: const Icon(Icons.person_add),
+              tooltip: 'Connect to Peer',
+              onPressed: _showAddPeerDialog,
+            ),
+          ],
           bottom: const TabBar(
             tabs: [
               Tab(icon: Icon(Icons.chat_bubble_outline), text: 'Chat'),
