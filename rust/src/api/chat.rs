@@ -98,7 +98,7 @@ pub fn get_full_node_id() -> Result<String> {
 ///
 /// This enables cross-network connectivity via the relay server.
 pub fn add_peer(node_id: String) -> Result<()> {
-    log::info!("[api] add_peer called: {}", &node_id[..8.min(node_id.len())]);
+    log::info!("[api] add_peer called ({} chars)", node_id.len());
     let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
 
     let (tx, rx) = oneshot::channel();

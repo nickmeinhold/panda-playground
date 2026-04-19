@@ -79,8 +79,9 @@ class _PlaygroundHomeState extends State<PlaygroundHome> {
       final fullId = await getFullNodeId();
       await Clipboard.setData(ClipboardData(text: fullId));
       if (mounted) {
+        final short = '${fullId.substring(0, 8)}...${fullId.substring(56)}';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Node ID copied ($fullId)')),
+          SnackBar(content: Text('Node ID copied ($short)')),
         );
       }
       _log('copied full node ID: $fullId');
