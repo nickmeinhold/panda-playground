@@ -8,8 +8,21 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `init_logging`, `rt`
 
-/// Start the p2panda node. Returns this node's short ID (first 8 chars of public key).
-Future<String> startNode() => RustLib.instance.api.crateApiChatStartNode();
+/// Start the p2panda node with persistent identity stored in `data_dir`.
+///
+/// Returns this node's short ID (first 8 chars of public key).
+Future<String> startNode({required String dataDir}) =>
+    RustLib.instance.api.crateApiChatStartNode(dataDir: dataDir);
+
+/// Get this node's full public key hex string (64 chars) for sharing with peers.
+Future<String> getFullNodeId() =>
+    RustLib.instance.api.crateApiChatGetFullNodeId();
+
+/// Add a remote peer by their hex-encoded public key.
+///
+/// This enables cross-network connectivity via the relay server.
+Future<void> addPeer({required String nodeId}) =>
+    RustLib.instance.api.crateApiChatAddPeer(nodeId: nodeId);
 
 /// Send a chat message. Broadcast to all nearby devices via gossip.
 Future<void> sendMessage({required String message}) =>

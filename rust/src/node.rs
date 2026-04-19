@@ -1,19 +1,53 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use p2panda_core::Hash;
-use p2panda_net::iroh_mdns::MdnsDiscoveryMode;
+use p2panda_core::{Hash, PrivateKey};
+use p2panda_net::addrs::NodeInfo;
 use p2panda_net::gossip::GossipHandle;
+use p2panda_net::iroh_endpoint::{EndpointAddr, RelayUrl, from_public_key};
+use p2panda_net::iroh_mdns::MdnsDiscoveryMode;
 use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip, MdnsDiscovery, TopicId};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
+const RELAY_URL: &str = "https://euc1-1.relay.n0.iroh-canary.iroh.link.";
+
 /// Network identifier for Panda Playground.
 fn network_id() -> Hash {
     Hash::new(b"panda-playground")
+}
+
+fn relay_url() -> Result<RelayUrl, NodeError> {
+    RELAY_URL
+        .parse()
+        .map_err(|e| NodeError::Network(format!("relay url: {e}")))
+}
+
+/// Load or generate a persistent private key in the given directory.
+fn load_or_create_key(data_dir: &Path) -> Result<PrivateKey, NodeError> {
+    let key_path = data_dir.join("node_key");
+
+    if key_path.exists() {
+        let bytes = std::fs::read(&key_path)
+            .map_err(|e| NodeError::Network(format!("read key: {e}")))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| NodeError::Network("corrupt key file (expected 32 bytes)".into()))?;
+        log::info!("[node] loaded existing private key from {}", key_path.display());
+        Ok(PrivateKey::from_bytes(&bytes))
+    } else {
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| NodeError::Network(format!("create data dir: {e}")))?;
+        let key = PrivateKey::new();
+        std::fs::write(&key_path, key.as_bytes())
+            .map_err(|e| NodeError::Network(format!("write key: {e}")))?;
+        log::info!("[node] generated new private key at {}", key_path.display());
+        Ok(key)
+    }
 }
 
 /// Derive a topic ID from a string name.
@@ -44,6 +78,7 @@ struct NodeInner {
     _endpoint: Endpoint,
     _mdns: MdnsDiscovery,
     _discovery: Discovery,
+    address_book: AddressBook,
     gossip: Gossip,
     public_key_hex: String,
     /// Cache of gossip stream handles — one per topic, reused for both publish and subscribe.
@@ -77,12 +112,14 @@ impl Node {
         }
     }
 
-    /// Start the node and begin discovering peers via mDNS.
-    pub async fn start(&self) -> Result<String, NodeError> {
+    /// Start the node with a persistent identity stored in `data_dir`.
+    pub async fn start(&self, data_dir: &str) -> Result<String, NodeError> {
         let mut inner = self.inner.write().await;
         if inner.is_some() {
             return Err(NodeError::AlreadyRunning);
         }
+
+        let private_key = load_or_create_key(Path::new(data_dir))?;
 
         let address_book = AddressBook::builder()
             .spawn()
@@ -91,6 +128,8 @@ impl Node {
 
         let endpoint = Endpoint::builder(address_book.clone())
             .network_id(network_id().into())
+            .private_key(private_key)
+            .relay_url(relay_url()?)
             .spawn()
             .await
             .map_err(|e| NodeError::Network(format!("endpoint: {e}")))?;
@@ -119,6 +158,7 @@ impl Node {
             _endpoint: endpoint,
             _mdns: mdns,
             _discovery: discovery,
+            address_book,
             gossip,
             public_key_hex: pk,
             streams: Mutex::new(HashMap::new()),
@@ -198,6 +238,39 @@ impl Node {
         let inner = self.inner.read().await;
         let inner = inner.as_ref().ok_or(NodeError::NotRunning)?;
         Ok(inner.public_key_hex[..8].to_string())
+    }
+
+    /// Get this node's full public key hex string (for sharing with peers).
+    pub async fn full_id(&self) -> Result<String, NodeError> {
+        let inner = self.inner.read().await;
+        let inner = inner.as_ref().ok_or(NodeError::NotRunning)?;
+        Ok(inner.public_key_hex.clone())
+    }
+
+    /// Add a remote peer by their hex-encoded public key.
+    ///
+    /// The peer is added to the address book as a bootstrap node with the relay URL,
+    /// enabling connection across different networks.
+    pub async fn add_peer(&self, node_id_hex: &str) -> Result<(), NodeError> {
+        let inner = self.inner.read().await;
+        let inner = inner.as_ref().ok_or(NodeError::NotRunning)?;
+
+        let public_key: p2panda_core::PublicKey = node_id_hex
+            .parse()
+            .map_err(|e| NodeError::Network(format!("invalid node ID: {e}")))?;
+
+        let endpoint_addr =
+            EndpointAddr::new(from_public_key(public_key)).with_relay_url(relay_url()?);
+        let node_info = NodeInfo::from(endpoint_addr).bootstrap();
+
+        inner
+            .address_book
+            .insert_node_info(node_info)
+            .await
+            .map_err(|e| NodeError::Network(format!("insert peer: {e}")))?;
+
+        log::info!("[node] added peer {}", &node_id_hex[..8]);
+        Ok(())
     }
 
     /// Shut down the node.

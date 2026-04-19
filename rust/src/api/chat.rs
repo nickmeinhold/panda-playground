@@ -50,23 +50,22 @@ fn init_logging() {
     }
 }
 
-/// Start the p2panda node. Returns this node's short ID (first 8 chars of public key).
-pub fn start_node() -> Result<String> {
+/// Start the p2panda node with persistent identity stored in `data_dir`.
+///
+/// Returns this node's short ID (first 8 chars of public key).
+pub fn start_node(data_dir: String) -> Result<String> {
     init_logging();
-    log::info!("[api] start_node called");
+    log::info!("[api] start_node called with data_dir: {data_dir}");
 
     let node = Node::new();
 
-    // Use a oneshot channel to get the result from the async task
     let (tx, rx) = oneshot::channel();
 
     rt().spawn(async move {
-        let result = node.start().await;
-        // We need to send both the node and the result back
+        let result = node.start(&data_dir).await;
         let _ = tx.send((node, result));
     });
 
-    // Block waiting for the result
     let (node, result) = rx
         .blocking_recv()
         .map_err(|_| anyhow!("node startup task failed"))?;
@@ -79,6 +78,37 @@ pub fn start_node() -> Result<String> {
 
     log::info!("[api] node started — ID: {short_id}, full key: {public_key}");
     Ok(short_id)
+}
+
+/// Get this node's full public key hex string (64 chars) for sharing with peers.
+pub fn get_full_node_id() -> Result<String> {
+    let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
+
+    let (tx, rx) = oneshot::channel();
+    rt().spawn(async move {
+        let _ = tx.send(node.full_id().await);
+    });
+
+    rx.blocking_recv()
+        .map_err(|_| anyhow!("task failed"))?
+        .map_err(|e| anyhow!("{e}"))
+}
+
+/// Add a remote peer by their hex-encoded public key.
+///
+/// This enables cross-network connectivity via the relay server.
+pub fn add_peer(node_id: String) -> Result<()> {
+    log::info!("[api] add_peer called ({} chars)", node_id.len());
+    let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
+
+    let (tx, rx) = oneshot::channel();
+    rt().spawn(async move {
+        let _ = tx.send(node.add_peer(&node_id).await);
+    });
+
+    rx.blocking_recv()
+        .map_err(|_| anyhow!("task failed"))?
+        .map_err(|e| anyhow!("{e}"))
 }
 
 /// Send a chat message. Broadcast to all nearby devices via gossip.
