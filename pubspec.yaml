@@ -38,6 +38,8 @@ dependencies:
   rust_lib_panda_playground:
     path: rust_builder
   path_provider: ^2.1.5
+  record: ^6.2.0
+  flutter_sound: ^9.30.0
 
 dev_dependencies:
   flutter_test:

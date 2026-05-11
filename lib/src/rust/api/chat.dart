@@ -46,5 +46,24 @@ Future<void> sendSketch({required String stroke}) =>
 Stream<String> subscribeSketch() =>
     RustLib.instance.api.crateApiChatSubscribeSketch();
 
+/// Initialize the Opus encoder and decoder for voice chat.
+///
+/// Must be called before `send_voice_frame` or `subscribe_voice`.
+Future<void> startVoiceSession() =>
+    RustLib.instance.api.crateApiChatStartVoiceSession();
+
+/// Encode a PCM audio frame with Opus and broadcast via gossip.
+///
+/// `pcm_bytes` should be 640 bytes of 16-bit signed LE PCM (320 samples at 16kHz = 20ms).
+Future<void> sendVoiceFrame({required List<int> pcmBytes}) =>
+    RustLib.instance.api.crateApiChatSendVoiceFrame(pcmBytes: pcmBytes);
+
+/// Subscribe to incoming voice frames from nearby devices.
+///
+/// Decoded PCM frames (640 bytes of 16-bit signed LE, 320 samples at 16kHz)
+/// are streamed to the sink. Own frames are skipped.
+Stream<Uint8List> subscribeVoice() =>
+    RustLib.instance.api.crateApiChatSubscribeVoice();
+
 /// Shut down the node.
 Future<void> stopNode() => RustLib.instance.api.crateApiChatStopNode();
