@@ -10,7 +10,8 @@ use p2panda_net::addrs::NodeInfo;
 use p2panda_net::gossip::GossipHandle;
 use p2panda_net::iroh_endpoint::{EndpointAddr, RelayUrl, from_public_key};
 use p2panda_net::iroh_mdns::MdnsDiscoveryMode;
-use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip, MdnsDiscovery, TopicId};
+use p2panda_core::Topic;
+use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip, MdnsDiscovery};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
@@ -51,10 +52,10 @@ fn load_or_create_key(data_dir: &Path) -> Result<PrivateKey, NodeError> {
 }
 
 /// Derive a topic ID from a string name.
-pub fn topic_from_name(name: &str) -> TopicId {
+pub fn topic_from_name(name: &str) -> Topic {
     let hash = Hash::new(format!("panda-playground/{name}").as_bytes());
     let bytes: [u8; 32] = *hash.as_bytes();
-    TopicId::from(bytes)
+    Topic::from(bytes)
 }
 
 #[derive(Debug, Error)]
@@ -82,12 +83,12 @@ struct NodeInner {
     gossip: Gossip,
     public_key_hex: String,
     /// Cache of gossip stream handles — one per topic, reused for both publish and subscribe.
-    streams: Mutex<HashMap<TopicId, GossipHandle>>,
+    streams: Mutex<HashMap<Topic, GossipHandle>>,
 }
 
 impl NodeInner {
     /// Get or create a gossip stream for a topic.
-    async fn get_stream(&self, topic: TopicId) -> Result<GossipHandle, NodeError> {
+    async fn get_stream(&self, topic: Topic) -> Result<GossipHandle, NodeError> {
         let topic_hex = format!("{topic:?}");
         let mut streams = self.streams.lock().await;
         if let Some(handle) = streams.get(&topic) {

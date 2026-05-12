@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:panda_playground/sketch_screen.dart';
+import 'package:panda_playground/voice_screen.dart';
 import 'package:panda_playground/src/rust/api/chat.dart';
 import 'package:panda_playground/src/rust/frb_generated.dart';
 
@@ -178,7 +179,7 @@ class _PlaygroundHomeState extends State<PlaygroundHome> {
     }
 
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
           title: Row(
@@ -208,6 +209,7 @@ class _PlaygroundHomeState extends State<PlaygroundHome> {
             tabs: [
               Tab(icon: Icon(Icons.chat_bubble_outline), text: 'Chat'),
               Tab(icon: Icon(Icons.brush_outlined), text: 'Sketch'),
+              Tab(icon: Icon(Icons.mic), text: 'Voice'),
             ],
           ),
         ),
@@ -215,6 +217,7 @@ class _PlaygroundHomeState extends State<PlaygroundHome> {
           children: [
             ChatTab(nodeId: _nodeId!),
             SketchScreen(nodeId: _nodeId),
+            VoiceScreen(nodeId: _nodeId),
           ],
         ),
       ),
