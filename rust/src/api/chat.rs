@@ -257,10 +257,18 @@ pub fn subscribe_sketch(sink: StreamSink<String>) -> Result<()> {
 
 /// Initialize the Opus encoder and decoder for voice chat.
 ///
-/// Must be called before `send_voice_frame` or `subscribe_voice`.
+/// Idempotent: safe to call repeatedly. The encoder and decoder are stored in
+/// process-global `OnceLock`s and survive widget rebuilds, hot restarts, and
+/// tab re-entries — re-initializing them would lose internal Opus state and
+/// reset PLC/jitter assumptions, so subsequent calls are a no-op.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start_voice_session() -> Result<()> {
-    log::info!("[api] start_voice_session called");
+    if OPUS_ENCODER.get().is_some() && OPUS_DECODER.get().is_some() {
+        log::info!("[api] start_voice_session: already initialized, no-op");
+        return Ok(());
+    }
+
+    log::info!("[api] start_voice_session: initializing");
 
     let encoder = OpusEncoder::new(SampleRate::Hz16000, Channels::Mono, Application::Voip)
         .map_err(|e| anyhow!("opus encoder: {e}"))?;
@@ -268,12 +276,8 @@ pub fn start_voice_session() -> Result<()> {
     let decoder = OpusDecoder::new(SampleRate::Hz16000, Channels::Mono)
         .map_err(|e| anyhow!("opus decoder: {e}"))?;
 
-    OPUS_ENCODER
-        .set(Mutex::new(encoder))
-        .map_err(|_| anyhow!("voice session already started"))?;
-    OPUS_DECODER
-        .set(Mutex::new(decoder))
-        .map_err(|_| anyhow!("voice session already started"))?;
+    let _ = OPUS_ENCODER.set(Mutex::new(encoder));
+    let _ = OPUS_DECODER.set(Mutex::new(decoder));
 
     log::info!("[api] opus encoder/decoder initialized (16kHz mono, VOIP)");
     Ok(())
@@ -289,21 +293,22 @@ pub fn send_voice_frame(pcm_bytes: Vec<u8>) -> Result<()> {
         .get()
         .ok_or_else(|| anyhow!("voice session not started"))?;
 
-    // Convert bytes to i16 samples
+    // Validate raw byte length up front so an odd-length input is rejected
+    // rather than silently truncated by chunks_exact(2).
+    let expected_bytes = OPUS_FRAME_SAMPLES * 2;
+    if pcm_bytes.len() != expected_bytes {
+        return Err(anyhow!(
+            "expected {} bytes of 16-bit LE PCM ({} samples at 16kHz mono = 20ms), got {} bytes",
+            expected_bytes,
+            OPUS_FRAME_SAMPLES,
+            pcm_bytes.len()
+        ));
+    }
+
     let samples: Vec<i16> = pcm_bytes
         .chunks_exact(2)
         .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
         .collect();
-
-    if samples.len() != OPUS_FRAME_SAMPLES {
-        return Err(anyhow!(
-            "expected {} samples ({} bytes), got {} samples ({} bytes)",
-            OPUS_FRAME_SAMPLES,
-            OPUS_FRAME_SAMPLES * 2,
-            samples.len(),
-            pcm_bytes.len()
-        ));
-    }
 
     // Encode PCM → Opus
     let mut opus_buf = vec![0u8; 256]; // Opus frames are typically <100 bytes

@@ -39,18 +39,8 @@ android_logger = "0.13.1"
 [target.'cfg(target_os = "ios")'.dependencies]
 oslog = "0.2"
 
-# INTEGRATION-TEST patches for the three drafted upstream PRs.
-# - /tmp/iroh-final: iroh + iroh-relay wasm-gating (commit 4b2915f)
-# - /tmp/p2panda: p2panda-net unconditional tokio target-gating (commit 068b3fe)
-# Once these PRs land upstream, these patch blocks should be removed entirely.
-[patch.crates-io]
-iroh = { path = "/tmp/iroh-final/iroh" }
-iroh-relay = { path = "/tmp/iroh-final/iroh-relay" }
-
-[patch."https://github.com/p2panda/p2panda"]
-p2panda-core = { path = "/tmp/p2panda/p2panda-core" }
-p2panda-discovery = { path = "/tmp/p2panda/p2panda-discovery" }
-p2panda-net = { path = "/tmp/p2panda/p2panda-net" }
-p2panda-store = { path = "/tmp/p2panda/p2panda-store" }
-p2panda-stream = { path = "/tmp/p2panda/p2panda-stream" }
-p2panda-sync = { path = "/tmp/p2panda/p2panda-sync" }
+# Native voice resolves iroh from crates.io and p2panda from the git rev pinned above.
+# WASM testing of in-flight upstream PRs (iroh #4238, p2panda-net tokio-gating) is done
+# out-of-tree against ~/git/experiments/iroh-final and ~/git/experiments/p2panda-v0.5.2
+# via a local-only Cargo.toml patch block — not committed here, since path-based patches
+# break for anyone cloning the repo.

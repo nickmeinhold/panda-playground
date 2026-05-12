@@ -1990,6 +1990,8 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "0.98.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9881b221c7c645d90594cbd331012f7cccb914894288a6cf5538a9115f6d0f3e"
 dependencies = [
  "backon",
  "blake3",
@@ -2005,7 +2007,7 @@ dependencies = [
  "hickory-resolver",
  "http",
  "ipnet",
- "iroh-base 0.98.0",
+ "iroh-base",
  "iroh-dns",
  "iroh-metrics",
  "iroh-relay",
@@ -2043,26 +2045,6 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "0.98.0"
-dependencies = [
- "curve25519-dalek 5.0.0-pre.6",
- "data-encoding",
- "data-encoding-macro",
- "derive_more",
- "digest 0.11.3",
- "ed25519-dalek 3.0.0-pre.6",
- "getrandom 0.4.2",
- "n0-error",
- "rand 0.10.1",
- "serde",
- "sha2 0.11.0-rc.5",
- "url",
- "zeroize",
- "zeroize_derive",
-]
-
-[[package]]
-name = "iroh-base"
-version = "0.98.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "738865784637830fb14204ebd3047922db83bc1816a59027af29579b9c27bd99"
 dependencies = [
@@ -2085,9 +2067,11 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "0.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca474630d1e62ddef83149db6babe6a1055d901df9054349d31b22df99811b92"
 dependencies = [
  "derive_more",
- "iroh-base 0.98.0",
+ "iroh-base",
  "n0-error",
  "n0-future",
  "simple-dns",
@@ -2112,7 +2096,7 @@ dependencies = [
  "hex",
  "indexmap",
  "iroh",
- "iroh-base 0.98.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "iroh-base",
  "iroh-metrics",
  "irpc",
  "n0-error",
@@ -2156,6 +2140,8 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "0.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aa6e9a7277bfbb439739c52b57eb5f9288030983928412022b8e94a43d4d838"
 dependencies = [
  "blake3",
  "bytes",
@@ -2168,7 +2154,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "iroh-base 0.98.0",
+ "iroh-base",
  "iroh-dns",
  "iroh-metrics",
  "lru",
@@ -2897,6 +2883,7 @@ dependencies = [
 [[package]]
 name = "p2panda-core"
 version = "0.5.2"
+source = "git+https://github.com/p2panda/p2panda?rev=3738fc0fc60641af430fc8d6c6393c73f0610b4e#3738fc0fc60641af430fc8d6c6393c73f0610b4e"
 dependencies = [
  "blake3",
  "ciborium",
@@ -2911,6 +2898,7 @@ dependencies = [
 [[package]]
 name = "p2panda-discovery"
 version = "0.5.2"
+source = "git+https://github.com/p2panda/p2panda?rev=3738fc0fc60641af430fc8d6c6393c73f0610b4e#3738fc0fc60641af430fc8d6c6393c73f0610b4e"
 dependencies = [
  "blake3",
  "futures-util",
@@ -2925,13 +2913,14 @@ dependencies = [
 [[package]]
 name = "p2panda-net"
 version = "0.5.2"
+source = "git+https://github.com/p2panda/p2panda?rev=3738fc0fc60641af430fc8d6c6393c73f0610b4e#3738fc0fc60641af430fc8d6c6393c73f0610b4e"
 dependencies = [
  "ciborium",
  "futures-channel",
  "futures-util",
  "hex",
  "iroh",
- "iroh-base 0.98.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "iroh-base",
  "iroh-gossip",
  "p2panda-core",
  "p2panda-discovery",
@@ -2951,6 +2940,7 @@ dependencies = [
 [[package]]
 name = "p2panda-store"
 version = "0.5.2"
+source = "git+https://github.com/p2panda/p2panda?rev=3738fc0fc60641af430fc8d6c6393c73f0610b4e#3738fc0fc60641af430fc8d6c6393c73f0610b4e"
 dependencies = [
  "p2panda-core",
  "serde",
@@ -2962,6 +2952,7 @@ dependencies = [
 [[package]]
 name = "p2panda-stream"
 version = "0.5.2"
+source = "git+https://github.com/p2panda/p2panda?rev=3738fc0fc60641af430fc8d6c6393c73f0610b4e#3738fc0fc60641af430fc8d6c6393c73f0610b4e"
 dependencies = [
  "futures-core",
  "p2panda-core",
@@ -2974,6 +2965,7 @@ dependencies = [
 [[package]]
 name = "p2panda-sync"
 version = "0.5.2"
+source = "git+https://github.com/p2panda/p2panda?rev=3738fc0fc60641af430fc8d6c6393c73f0610b4e#3738fc0fc60641af430fc8d6c6393c73f0610b4e"
 dependencies = [
  "futures",
  "futures-util",

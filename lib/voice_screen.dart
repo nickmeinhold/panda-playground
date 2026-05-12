@@ -31,11 +31,9 @@ class _VoiceScreenState extends State<VoiceScreen>
   bool _sessionReady = false;
   bool _transmitting = false;
   bool _receiving = false;
-  String? _receivingFrom;
   String? _error;
 
   StreamSubscription<Uint8List>? _voiceSubscription;
-  StreamSubscription<RecordState>? _recorderStateSubscription;
   StreamSubscription<Uint8List>? _micSubscription;
 
   @override
@@ -158,7 +156,6 @@ class _VoiceScreenState extends State<VoiceScreen>
     _receiveTimer?.cancel();
     _voiceSubscription?.cancel();
     _micSubscription?.cancel();
-    _recorderStateSubscription?.cancel();
     _recorder.dispose();
     _player.closePlayer();
     super.dispose();
@@ -209,9 +206,7 @@ class _VoiceScreenState extends State<VoiceScreen>
                 Icon(Icons.volume_up, color: theme.colorScheme.secondary),
                 const SizedBox(width: 8),
                 Text(
-                  _receivingFrom != null
-                      ? 'Receiving from $_receivingFrom'
-                      : 'Receiving...',
+                  'Receiving...',
                   style: TextStyle(color: theme.colorScheme.secondary),
                 ),
               ],
