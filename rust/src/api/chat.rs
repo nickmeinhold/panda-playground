@@ -40,6 +40,12 @@ const OPUS_FRAME_SAMPLES: usize = 320;
 /// Sender ID prefix length in voice messages.
 #[cfg(not(target_arch = "wasm32"))]
 const VOICE_SENDER_LEN: usize = 8;
+/// Bounded voice publisher queue capacity. 10 frames at 50fps (20ms each)
+/// is roughly 200ms of buffered audio; chosen as the smallest cap that
+/// absorbs typical gossip rebroadcast jitter without blocking the mic
+/// stream. Tune via empirical measurement under real mesh conditions.
+#[cfg(not(target_arch = "wasm32"))]
+const VOICE_QUEUE_CAPACITY: usize = 10;
 
 fn rt() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
@@ -321,7 +327,7 @@ pub fn start_voice_session() -> Result<()> {
     // Spawn the voice publisher task. It runs for the lifetime of the process
     // (the channel sender never gets dropped — it's stored in a OnceLock),
     // pulling payloads off the bounded queue and publishing to gossip.
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(10);
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(VOICE_QUEUE_CAPACITY);
     rt().spawn(async move {
         log::info!("[voice] publisher task started");
         while let Some(payload) = rx.recv().await {
