@@ -41,6 +41,7 @@ class _VoiceScreenState extends State<VoiceScreen>
   bool _sessionReady = false;
   bool _receiving = false;
   bool _voiceStreamHealthy = true;
+  bool _reconnecting = false;
   bool _permissionWarningShown = false;
   _TransmitState _transmit = _TransmitState.idle;
   String? _error;
@@ -79,24 +80,70 @@ class _VoiceScreenState extends State<VoiceScreen>
 
       setState(() => _sessionReady = true);
 
-      // Subscribe to incoming voice frames. Stream errors / completion are
-      // surfaced into UI via _voiceStreamHealthy so a silent gossip-stream
-      // termination doesn't look like a working voice tab.
-      _voiceSubscription = subscribeVoice().listen(
-        _onVoiceFrame,
-        onError: (Object e) {
-          _log('voice stream error: $e');
-          if (mounted) setState(() => _voiceStreamHealthy = false);
-        },
-        onDone: () {
-          _log('voice stream closed');
-          if (mounted) setState(() => _voiceStreamHealthy = false);
-        },
-      );
-      _log('voice subscription active');
+      _subscribeToVoice();
     } catch (e) {
       _log('init error: $e');
       setState(() => _error = e.toString());
+    }
+  }
+
+  /// Wire up the voice-receive subscription. Stream errors / completion are
+  /// surfaced into UI via `_voiceStreamHealthy` so a silent gossip-stream
+  /// termination doesn't look like a working voice tab.
+  ///
+  /// Used at first init and again on user-driven reconnect (tap-to-retry).
+  void _subscribeToVoice() {
+    _voiceSubscription = subscribeVoice().listen(
+      _onVoiceFrame,
+      onError: (Object e) {
+        _log('voice stream error: $e');
+        if (mounted) setState(() => _voiceStreamHealthy = false);
+      },
+      onDone: () {
+        _log('voice stream closed');
+        if (mounted) setState(() => _voiceStreamHealthy = false);
+      },
+    );
+    _log('voice subscription active');
+  }
+
+  /// Tear down the dead subscription and start a fresh one. The Rust-side
+  /// task that fed the previous subscription has already exited (that's
+  /// why the Dart stream surfaced onError/onDone in the first place), so
+  /// this is cheap — a new tokio task, a new mpsc receiver against the same
+  /// underlying gossip stream.
+  Future<void> _tryReconnect() async {
+    if (_reconnecting) return;
+    setState(() => _reconnecting = true);
+    _log('reconnect attempt');
+
+    try {
+      await _voiceSubscription?.cancel();
+    } catch (e) {
+      _log('cancel dead subscription failed (expected): $e');
+    }
+    _voiceSubscription = null;
+
+    try {
+      _subscribeToVoice();
+      if (mounted) {
+        setState(() {
+          _voiceStreamHealthy = true;
+          _reconnecting = false;
+        });
+      }
+      _log('reconnect succeeded');
+    } catch (e) {
+      _log('reconnect failed: $e');
+      if (mounted) {
+        setState(() => _reconnecting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reconnect failed: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     }
   }
 
@@ -288,34 +335,50 @@ class _VoiceScreenState extends State<VoiceScreen>
       children: [
         // Disconnected banner — voice gossip stream ended or errored. The
         // mic still works (transmits won't fail) but no incoming voice
-        // will arrive, so this needs to be visible.
+        // will arrive, so this needs to be visible. Tap to retry.
         if (!_voiceStreamHealthy)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24)
                 .copyWith(bottom: 16),
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.errorContainer,
+            child: Material(
+              color: theme.colorScheme.errorContainer,
+              borderRadius: BorderRadius.circular(8),
+              child: InkWell(
                 borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.cloud_off,
-                    color: theme.colorScheme.onErrorContainer,
-                  ),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      'Voice stream disconnected — restart the app to reconnect.',
-                      style: TextStyle(
-                        color: theme.colorScheme.onErrorContainer,
+                onTap: _reconnecting ? null : _tryReconnect,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_reconnecting)
+                        SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: theme.colorScheme.onErrorContainer,
+                          ),
+                        )
+                      else
+                        Icon(
+                          Icons.cloud_off,
+                          color: theme.colorScheme.onErrorContainer,
+                        ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          _reconnecting
+                              ? 'Reconnecting...'
+                              : 'Voice stream disconnected — tap to reconnect.',
+                          style: TextStyle(
+                            color: theme.colorScheme.onErrorContainer,
+                          ),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
           ),
