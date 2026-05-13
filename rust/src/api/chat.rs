@@ -12,7 +12,7 @@ use audiopus::{Application, Channels, MutSignals, SampleRate};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use log::LevelFilter;
 use tokio::runtime::Runtime;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::frb_generated::StreamSink;
 use crate::node::{GossipTopic, Node};
@@ -23,6 +23,16 @@ static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static OPUS_ENCODER: OnceLock<Mutex<OpusEncoder>> = OnceLock::new();
 #[cfg(not(target_arch = "wasm32"))]
 static OPUS_DECODER: OnceLock<Mutex<OpusDecoder>> = OnceLock::new();
+/// Bounded channel feeding the voice publisher task. Capacity 10 ≈ 200ms of
+/// frames at 50fps; `try_send` is non-blocking and drops the new frame on
+/// overflow (drop-newest is acceptable for voice — sustained backpressure
+/// can't be "caught up" in real time anyway).
+#[cfg(not(target_arch = "wasm32"))]
+static VOICE_TX: OnceLock<mpsc::Sender<Vec<u8>>> = OnceLock::new();
+/// Cached 8-byte sender prefix derived from this node's short_id. Computed
+/// once at voice-session start so per-frame send is fully synchronous.
+#[cfg(not(target_arch = "wasm32"))]
+static MY_VOICE_SENDER_BYTES: OnceLock<[u8; VOICE_SENDER_LEN]> = OnceLock::new();
 
 /// Opus frame size: 320 samples = 20ms at 16kHz.
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,6 +40,12 @@ const OPUS_FRAME_SAMPLES: usize = 320;
 /// Sender ID prefix length in voice messages.
 #[cfg(not(target_arch = "wasm32"))]
 const VOICE_SENDER_LEN: usize = 8;
+/// Bounded voice publisher queue capacity. 10 frames at 50fps (20ms each)
+/// is roughly 200ms of buffered audio; chosen as the smallest cap that
+/// absorbs typical gossip rebroadcast jitter without blocking the mic
+/// stream. Tune via empirical measurement under real mesh conditions.
+#[cfg(not(target_arch = "wasm32"))]
+const VOICE_QUEUE_CAPACITY: usize = 10;
 
 fn rt() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
@@ -256,12 +272,12 @@ pub fn subscribe_sketch(sink: StreamSink<String>) -> Result<()> {
         .map_err(|_| anyhow!("subscribe task failed"))?
 }
 
-/// Initialize the Opus encoder and decoder for voice chat.
+/// Initialize the Opus encoder and decoder for voice chat, plus the
+/// long-running publisher task that drains the voice queue.
 ///
-/// Idempotent: safe to call repeatedly. The encoder and decoder are stored in
-/// process-global `OnceLock`s and survive widget rebuilds, hot restarts, and
-/// tab re-entries — re-initializing them would lose internal Opus state and
-/// reset PLC/jitter assumptions, so subsequent calls are a no-op.
+/// Idempotent: safe to call repeatedly. All process-global state lives in
+/// `OnceLock`s and survives widget rebuilds, hot restarts, and tab
+/// re-entries; subsequent calls are a no-op.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start_voice_session() -> Result<()> {
     if OPUS_ENCODER.get().is_some() && OPUS_DECODER.get().is_some() {
@@ -270,6 +286,26 @@ pub fn start_voice_session() -> Result<()> {
     }
 
     log::info!("[api] start_voice_session: initializing");
+
+    let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
+
+    // Cache the 8-byte sender prefix once. `short_id()` is stable for a given
+    // node (it's a slice of the public key hex), so per-frame send doesn't
+    // need to repeat the async fetch.
+    let short_id_str = rt()
+        .block_on(async { node.short_id().await })
+        .map_err(|e| anyhow!("short_id: {e}"))?;
+    let bytes = short_id_str.as_bytes();
+    if bytes.len() < VOICE_SENDER_LEN {
+        return Err(anyhow!(
+            "short_id is {} bytes, need at least {}",
+            bytes.len(),
+            VOICE_SENDER_LEN
+        ));
+    }
+    let mut sender_bytes = [0u8; VOICE_SENDER_LEN];
+    sender_bytes.copy_from_slice(&bytes[..VOICE_SENDER_LEN]);
+    let _ = MY_VOICE_SENDER_BYTES.set(sender_bytes);
 
     let mut encoder = OpusEncoder::new(SampleRate::Hz16000, Channels::Mono, Application::Voip)
         .map_err(|e| anyhow!("opus encoder: {e}"))?;
@@ -288,19 +324,46 @@ pub fn start_voice_session() -> Result<()> {
     let _ = OPUS_ENCODER.set(Mutex::new(encoder));
     let _ = OPUS_DECODER.set(Mutex::new(decoder));
 
+    // Spawn the voice publisher task. It runs for the lifetime of the process
+    // (the channel sender never gets dropped — it's stored in a OnceLock),
+    // pulling payloads off the bounded queue and publishing to gossip.
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(VOICE_QUEUE_CAPACITY);
+    rt().spawn(async move {
+        log::info!("[voice] publisher task started");
+        while let Some(payload) = rx.recv().await {
+            if let Err(e) = node.publish(GossipTopic::Voice, payload).await {
+                log::warn!("[voice] publish failed: {e}");
+            }
+        }
+        log::info!("[voice] publisher task ended (channel closed)");
+    });
+    let _ = VOICE_TX.set(tx);
+
     log::info!("[api] opus encoder/decoder initialized (16kHz mono, VOIP, DTX on)");
     Ok(())
 }
 
-/// Encode a PCM audio frame with Opus and broadcast via gossip.
+/// Encode a PCM audio frame with Opus and enqueue it for the voice publisher
+/// task. Fire-and-forget: the caller doesn't wait for gossip publish to
+/// complete, so a 50fps mic stream isn't bottlenecked by per-frame round-trip.
 ///
-/// `pcm_bytes` should be 640 bytes of 16-bit signed LE PCM (320 samples at 16kHz = 20ms).
+/// `pcm_bytes` must be exactly 640 bytes of 16-bit signed LE PCM (320 samples
+/// at 16kHz = 20ms).
+///
+/// If the publisher queue is full, the new frame is silently dropped —
+/// voice tolerates loss far better than latency, and sustained backpressure
+/// means real-time playback can't catch up anyway.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn send_voice_frame(pcm_bytes: Vec<u8>) -> Result<()> {
-    let node = NODE.get().ok_or_else(|| anyhow!("node not started"))?;
     let encoder = OPUS_ENCODER
         .get()
         .ok_or_else(|| anyhow!("voice session not started"))?;
+    let sender_bytes = MY_VOICE_SENDER_BYTES
+        .get()
+        .ok_or_else(|| anyhow!("voice session not started (sender prefix missing)"))?;
+    let tx = VOICE_TX
+        .get()
+        .ok_or_else(|| anyhow!("voice session not started (publisher channel missing)"))?;
 
     // Validate raw byte length up front so an odd-length input is rejected
     // rather than silently truncated by chunks_exact(2).
@@ -328,25 +391,23 @@ pub fn send_voice_frame(pcm_bytes: Vec<u8>) -> Result<()> {
     };
     opus_buf.truncate(encoded_len);
 
-    // Prepend sender ID
-    let (tx, rx) = oneshot::channel();
-    let node_ref = node;
-    rt().spawn(async move {
-        let result = async {
-            let short_id = node_ref.short_id().await?;
-            let mut payload = Vec::with_capacity(VOICE_SENDER_LEN + opus_buf.len());
-            payload.extend_from_slice(short_id.as_bytes());
-            payload.extend_from_slice(&opus_buf);
-            node_ref.publish(GossipTopic::Voice, payload).await?;
-            Ok::<_, crate::node::NodeError>(())
-        }
-        .await;
-        let _ = tx.send(result);
-    });
+    // Build payload: [8-byte sender prefix][Opus packet]
+    let mut payload = Vec::with_capacity(VOICE_SENDER_LEN + opus_buf.len());
+    payload.extend_from_slice(sender_bytes);
+    payload.extend_from_slice(&opus_buf);
 
-    rx.blocking_recv()
-        .map_err(|_| anyhow!("send task failed"))?
-        .map_err(|e| anyhow!("{e}"))
+    // Fire and forget. try_send is non-blocking; if the queue is full we
+    // drop the new frame and continue.
+    match tx.try_send(payload) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            log::debug!("[voice] publisher queue full, dropping frame");
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(anyhow!("voice publisher task is no longer running"))
+        }
+    }
 }
 
 /// Subscribe to incoming voice frames from nearby devices.
@@ -361,19 +422,15 @@ pub fn subscribe_voice(sink: StreamSink<Vec<u8>>) -> Result<()> {
         .get()
         .ok_or_else(|| anyhow!("voice session not started"))?;
 
+    let my_sender_bytes = MY_VOICE_SENDER_BYTES
+        .get()
+        .copied()
+        .ok_or_else(|| anyhow!("voice session not started (sender prefix missing)"))?;
+
     let (tx, rx) = oneshot::channel();
     let node_ref = node;
 
     rt().spawn(async move {
-        // Get our own short ID to filter self-messages.
-        let my_id = match node_ref.short_id().await {
-            Ok(id) => id,
-            Err(e) => {
-                let _ = tx.send(Err(anyhow!("get short id: {e}")));
-                return;
-            }
-        };
-
         match node_ref.subscribe(GossipTopic::Voice).await {
             Ok(mut receiver) => {
                 log::info!("[api] voice subscription established");
@@ -386,7 +443,7 @@ pub fn subscribe_voice(sink: StreamSink<Vec<u8>>) -> Result<()> {
 
                     // Split sender ID and opus frame
                     let sender = &bytes[..VOICE_SENDER_LEN];
-                    if sender == my_id.as_bytes() {
+                    if sender == my_sender_bytes {
                         continue; // skip own voice
                     }
 
