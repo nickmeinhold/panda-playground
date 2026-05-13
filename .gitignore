@@ -12,6 +12,12 @@
 .swiftpm/
 migrate_working_dir/
 
+# Out-of-tree upstream contribution artifacts (patches against p2panda /
+# iroh, generated from this project's investigations). Not part of the
+# panda-playground build; live alongside the repo for convenience.
+00*-*.patch
+00*-*-email-draft.md
+
 # IntelliJ related
 *.iml
 *.ipr
