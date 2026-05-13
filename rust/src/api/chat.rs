@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
@@ -40,12 +42,28 @@ const OPUS_FRAME_SAMPLES: usize = 320;
 /// Sender ID prefix length in voice messages.
 #[cfg(not(target_arch = "wasm32"))]
 const VOICE_SENDER_LEN: usize = 8;
+/// Sequence number length (u32 big-endian, monotonically increasing per session).
+#[cfg(not(target_arch = "wasm32"))]
+const VOICE_SEQ_LEN: usize = 4;
+/// Voice payload header: `[8-byte sender][4-byte BE seq][opus packet]`.
+#[cfg(not(target_arch = "wasm32"))]
+const VOICE_PREFIX_LEN: usize = VOICE_SENDER_LEN + VOICE_SEQ_LEN;
+/// Maximum number of missing frames we'll generate Opus PLC concealment for.
+/// 25 frames at 50fps = 500ms of synthetic audio. Larger gaps imply sender
+/// restart or massive jitter event — we reset sequence tracking instead.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_PLC_GAP: u32 = 25;
 /// Bounded voice publisher queue capacity. 10 frames at 50fps (20ms each)
 /// is roughly 200ms of buffered audio; chosen as the smallest cap that
 /// absorbs typical gossip rebroadcast jitter without blocking the mic
 /// stream. Tune via empirical measurement under real mesh conditions.
 #[cfg(not(target_arch = "wasm32"))]
 const VOICE_QUEUE_CAPACITY: usize = 10;
+
+/// Monotonic sequence counter for outgoing voice frames. u32 wraps after
+/// ~2.7 years at 50fps; not a concern for any realistic session.
+#[cfg(not(target_arch = "wasm32"))]
+static VOICE_SEQ_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn rt() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
@@ -391,9 +409,13 @@ pub fn send_voice_frame(pcm_bytes: Vec<u8>) -> Result<()> {
     };
     opus_buf.truncate(encoded_len);
 
-    // Build payload: [8-byte sender prefix][Opus packet]
-    let mut payload = Vec::with_capacity(VOICE_SENDER_LEN + opus_buf.len());
+    // Build payload: [8-byte sender prefix][4-byte BE seq][Opus packet].
+    // Sequence numbers let the receiver detect dropped/reordered frames and
+    // synthesize concealment audio via Opus PLC for short gaps.
+    let seq = VOICE_SEQ_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut payload = Vec::with_capacity(VOICE_PREFIX_LEN + opus_buf.len());
     payload.extend_from_slice(sender_bytes);
+    payload.extend_from_slice(&seq.to_be_bytes());
     payload.extend_from_slice(&opus_buf);
 
     // Fire and forget. try_send is non-blocking; if the queue is full we
@@ -436,22 +458,62 @@ pub fn subscribe_voice(sink: StreamSink<Vec<u8>>) -> Result<()> {
                 log::info!("[api] voice subscription established");
                 let _ = tx.send(Ok(()));
 
+                // Per-sender last-seen sequence, used for gap detection.
+                let mut last_seq: HashMap<[u8; VOICE_SENDER_LEN], u32> = HashMap::new();
+
                 while let Some(bytes) = receiver.recv().await {
-                    if bytes.len() <= VOICE_SENDER_LEN {
+                    if bytes.len() <= VOICE_PREFIX_LEN {
                         continue;
                     }
 
-                    // Split sender ID and opus frame
-                    let sender = &bytes[..VOICE_SENDER_LEN];
-                    if sender == my_sender_bytes {
+                    let sender_slice = &bytes[..VOICE_SENDER_LEN];
+                    if sender_slice == my_sender_bytes {
                         continue; // skip own voice
                     }
 
-                    let opus_frame = &bytes[VOICE_SENDER_LEN..];
+                    // Copy the sender slice into an owned array so we can use
+                    // it as a HashMap key. The slice is small (8 bytes) and
+                    // we'd be copying it for the map insert anyway.
+                    let mut sender = [0u8; VOICE_SENDER_LEN];
+                    sender.copy_from_slice(sender_slice);
 
-                    // Decode Opus → PCM
-                    let mut pcm_samples = vec![0i16; OPUS_FRAME_SAMPLES];
-                    let decoded_len = {
+                    let seq = u32::from_be_bytes(
+                        bytes[VOICE_SENDER_LEN..VOICE_PREFIX_LEN]
+                            .try_into()
+                            .expect("VOICE_SEQ_LEN sized slice"),
+                    );
+                    let opus_frame = &bytes[VOICE_PREFIX_LEN..];
+
+                    // Detect gap vs the last seq we saw from this sender.
+                    // - first frame from this sender: no PLC
+                    // - reorder or duplicate (seq <= last): drop the packet
+                    // - forward gap N <= MAX_PLC_GAP: PLC for (N-1) missing frames
+                    // - forward gap > MAX_PLC_GAP: sender restart or huge jitter;
+                    //   reset state, no PLC
+                    let plc_count = match last_seq.get(&sender).copied() {
+                        None => 0,
+                        Some(prev) if seq <= prev => {
+                            log::debug!(
+                                "[voice] late/dup frame seq={seq} (prev={prev}) — dropping"
+                            );
+                            continue;
+                        }
+                        Some(prev) => {
+                            let gap = seq - prev - 1;
+                            if gap > MAX_PLC_GAP {
+                                log::debug!(
+                                    "[voice] huge gap of {gap} frames — skipping PLC, resetting"
+                                );
+                                0
+                            } else {
+                                gap
+                            }
+                        }
+                    };
+
+                    // Decode (with optional PLC for missing frames) under one
+                    // lock to avoid contention churn per frame.
+                    let pcm_chunks: Vec<Vec<u8>> = {
                         let mut dec = match decoder.lock() {
                             Ok(d) => d,
                             Err(e) => {
@@ -459,38 +521,67 @@ pub fn subscribe_voice(sink: StreamSink<Vec<u8>>) -> Result<()> {
                                 continue;
                             }
                         };
-                        let packet = match OpusPacket::try_from(opus_frame) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                log::warn!("[api] invalid opus packet: {e}");
+
+                        let mut out_chunks: Vec<Vec<u8>> =
+                            Vec::with_capacity((plc_count as usize) + 1);
+
+                        // PLC concealment for each missing frame.
+                        for _ in 0..plc_count {
+                            let mut pcm = vec![0i16; OPUS_FRAME_SAMPLES];
+                            let Ok(output) = MutSignals::try_from(&mut pcm) else {
                                 continue;
-                            }
-                        };
-                        let output = match MutSignals::try_from(&mut pcm_samples) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                log::warn!("[api] signals error: {e}");
-                                continue;
-                            }
-                        };
-                        match dec.decode(Some(packet), output, false) {
-                            Ok(len) => len,
-                            Err(e) => {
-                                log::warn!("[api] opus decode error: {e}");
-                                continue;
+                            };
+                            // `None` packet asks Opus for packet-loss concealment.
+                            match dec.decode(None, output, false) {
+                                Ok(len) => {
+                                    out_chunks.push(
+                                        pcm[..len]
+                                            .iter()
+                                            .flat_map(|s| s.to_le_bytes())
+                                            .collect(),
+                                    );
+                                }
+                                Err(e) => {
+                                    log::debug!("[api] opus PLC decode error: {e}");
+                                }
                             }
                         }
+
+                        // Decode the actual packet.
+                        let mut pcm = vec![0i16; OPUS_FRAME_SAMPLES];
+                        match OpusPacket::try_from(opus_frame) {
+                            Ok(packet) => {
+                                if let Ok(output) = MutSignals::try_from(&mut pcm) {
+                                    match dec.decode(Some(packet), output, false) {
+                                        Ok(len) => {
+                                            out_chunks.push(
+                                                pcm[..len]
+                                                    .iter()
+                                                    .flat_map(|s| s.to_le_bytes())
+                                                    .collect(),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            log::warn!("[api] opus decode error: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("[api] invalid opus packet: {e}");
+                            }
+                        }
+
+                        out_chunks
                     };
 
-                    // Convert i16 samples → bytes (LE)
-                    let pcm_bytes: Vec<u8> = pcm_samples[..decoded_len]
-                        .iter()
-                        .flat_map(|s| s.to_le_bytes())
-                        .collect();
+                    last_seq.insert(sender, seq);
 
-                    if sink.add(pcm_bytes).is_err() {
-                        log::warn!("[api] voice StreamSink closed");
-                        break;
+                    for chunk in pcm_chunks {
+                        if sink.add(chunk).is_err() {
+                            log::warn!("[api] voice StreamSink closed");
+                            break;
+                        }
                     }
                 }
                 log::warn!("[api] voice receiver ended");
