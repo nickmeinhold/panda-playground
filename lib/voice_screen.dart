@@ -31,6 +31,7 @@ class _VoiceScreenState extends State<VoiceScreen>
   bool _sessionReady = false;
   bool _transmitting = false;
   bool _receiving = false;
+  bool _permissionWarningShown = false;
   String? _error;
 
   StreamSubscription<Uint8List>? _voiceSubscription;
@@ -103,7 +104,8 @@ class _VoiceScreenState extends State<VoiceScreen>
     final hasPermission = await _recorder.hasPermission();
     if (!hasPermission) {
       _log('microphone permission denied');
-      if (mounted) {
+      if (mounted && !_permissionWarningShown) {
+        _permissionWarningShown = true;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
