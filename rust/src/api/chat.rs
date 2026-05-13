@@ -485,28 +485,33 @@ pub fn subscribe_voice(sink: StreamSink<Vec<u8>>) -> Result<()> {
                     let opus_frame = &bytes[VOICE_PREFIX_LEN..];
 
                     // Detect gap vs the last seq we saw from this sender.
-                    // - first frame from this sender: no PLC
-                    // - reorder or duplicate (seq <= last): drop the packet
-                    // - forward gap N <= MAX_PLC_GAP: PLC for (N-1) missing frames
-                    // - forward gap > MAX_PLC_GAP: sender restart or huge jitter;
-                    //   reset state, no PLC
+                    // Handled cases:
+                    //   no prior state         → first frame, accept, no PLC
+                    //   forward == 0           → exact duplicate, drop
+                    //   forward 1..=MAX_PLC_GAP → PLC for (forward - 1) missing frames
+                    //   backward 1..=MAX_PLC_GAP → small reorder, drop (no jitter buffer yet)
+                    //   otherwise              → sender restart / huge jitter; reset state
                     let plc_count = match last_seq.get(&sender).copied() {
                         None => 0,
-                        Some(prev) if seq <= prev => {
-                            log::debug!(
-                                "[voice] late/dup frame seq={seq} (prev={prev}) — dropping"
-                            );
-                            continue;
-                        }
                         Some(prev) => {
-                            let gap = seq - prev - 1;
-                            if gap > MAX_PLC_GAP {
+                            let forward = seq.wrapping_sub(prev);
+                            let backward = prev.wrapping_sub(seq);
+
+                            if forward == 0 {
+                                log::debug!("[voice] duplicate frame seq={seq} — dropping");
+                                continue;
+                            } else if forward <= MAX_PLC_GAP {
+                                forward - 1
+                            } else if backward <= MAX_PLC_GAP {
                                 log::debug!(
-                                    "[voice] huge gap of {gap} frames — skipping PLC, resetting"
+                                    "[voice] reorder seq={seq} prev={prev} — dropping (no jitter buffer)"
+                                );
+                                continue;
+                            } else {
+                                log::debug!(
+                                    "[voice] sender reset detected (seq={seq}, prev={prev}) — resetting state"
                                 );
                                 0
-                            } else {
-                                gap
                             }
                         }
                     };
