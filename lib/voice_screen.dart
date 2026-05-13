@@ -13,6 +13,15 @@ void _log(String msg) {
   debugPrint('[voice] $msg');
 }
 
+/// Push-to-talk transmit lifecycle.
+///
+/// The transitions are: `idle → starting → transmitting → stopping → idle`,
+/// plus `starting → idle` on failure (e.g. recorder error after permission
+/// was granted). Modelling these explicitly avoids the "stuck in
+/// Transmitting" bug that a pair of booleans can't represent — every state
+/// has exactly one valid set of outgoing transitions.
+enum _TransmitState { idle, starting, transmitting, stopping }
+
 /// Voice tab — push-to-talk walkie-talkie over p2p gossip.
 class VoiceScreen extends StatefulWidget {
   final String? nodeId;
@@ -27,15 +36,18 @@ class _VoiceScreenState extends State<VoiceScreen>
     with AutomaticKeepAliveClientMixin {
   final AudioRecorder _recorder = AudioRecorder();
   final FlutterSoundPlayer _player = FlutterSoundPlayer();
+  final BytesBuilder _frameBuffer = BytesBuilder(copy: false);
 
   bool _sessionReady = false;
-  bool _transmitting = false;
   bool _receiving = false;
+  bool _voiceStreamHealthy = true;
   bool _permissionWarningShown = false;
+  _TransmitState _transmit = _TransmitState.idle;
   String? _error;
 
   StreamSubscription<Uint8List>? _voiceSubscription;
   StreamSubscription<Uint8List>? _micSubscription;
+  Timer? _receiveTimer;
 
   @override
   bool get wantKeepAlive => true;
@@ -67,11 +79,19 @@ class _VoiceScreenState extends State<VoiceScreen>
 
       setState(() => _sessionReady = true);
 
-      // Subscribe to incoming voice frames.
+      // Subscribe to incoming voice frames. Stream errors / completion are
+      // surfaced into UI via _voiceStreamHealthy so a silent gossip-stream
+      // termination doesn't look like a working voice tab.
       _voiceSubscription = subscribeVoice().listen(
         _onVoiceFrame,
-        onError: (e) => _log('voice stream error: $e'),
-        onDone: () => _log('voice stream closed'),
+        onError: (Object e) {
+          _log('voice stream error: $e');
+          if (mounted) setState(() => _voiceStreamHealthy = false);
+        },
+        onDone: () {
+          _log('voice stream closed');
+          if (mounted) setState(() => _voiceStreamHealthy = false);
+        },
       );
       _log('voice subscription active');
     } catch (e) {
@@ -79,8 +99,6 @@ class _VoiceScreenState extends State<VoiceScreen>
       setState(() => _error = e.toString());
     }
   }
-
-  Timer? _receiveTimer;
 
   /// Called for each decoded PCM frame received from a peer.
   void _onVoiceFrame(Uint8List pcmBytes) {
@@ -97,9 +115,24 @@ class _VoiceScreenState extends State<VoiceScreen>
     _player.feedUint8FromStream(pcmBytes);
   }
 
+  /// Buffer mic-stream chunks and emit exact 640-byte (320-sample) frames.
+  void _onMicChunk(Uint8List chunk) {
+    _frameBuffer.add(chunk);
+    while (_frameBuffer.length >= 640) {
+      final bytes = _frameBuffer.takeBytes();
+      final frame = bytes.sublist(0, 640);
+      if (bytes.length > 640) {
+        _frameBuffer.add(bytes.sublist(640));
+      }
+      sendVoiceFrame(pcmBytes: frame).catchError((Object e) {
+        _log('send voice error: $e');
+      });
+    }
+  }
+
   /// Start transmitting — capture mic and send frames.
   Future<void> _startTransmit() async {
-    if (!_sessionReady || _transmitting) return;
+    if (_transmit != _TransmitState.idle || !_sessionReady) return;
 
     final hasPermission = await _recorder.hasPermission();
     if (!hasPermission) {
@@ -119,51 +152,75 @@ class _VoiceScreenState extends State<VoiceScreen>
       return;
     }
 
-    setState(() => _transmitting = true);
-    _log('PTT start');
+    setState(() => _transmit = _TransmitState.starting);
+    _log('PTT starting');
 
-    // Start recording mic as 16kHz mono 16-bit PCM stream.
-    final stream = await _recorder.startStream(
-      const RecordConfig(
-        encoder: AudioEncoder.pcm16bits,
-        sampleRate: 16000,
-        numChannels: 1,
-        autoGain: true,
-        echoCancel: true,
-        noiseSuppress: true,
-      ),
-    );
-
-    // Buffer incoming PCM and send in 640-byte frames (320 samples = 20ms).
-    final buffer = BytesBuilder(copy: false);
-    _micSubscription = stream.listen((chunk) {
-      buffer.add(chunk);
-      while (buffer.length >= 640) {
-        final bytes = buffer.takeBytes();
-        // Take exactly 640 bytes, put remainder back.
-        final frame = bytes.sublist(0, 640);
-        if (bytes.length > 640) {
-          buffer.add(bytes.sublist(640));
-        }
-        sendVoiceFrame(pcmBytes: frame).catchError((e) {
-          _log('send voice error: $e');
-        });
+    try {
+      // Start recording mic as 16kHz mono 16-bit PCM stream.
+      final stream = await _recorder.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: 16000,
+          numChannels: 1,
+          autoGain: true,
+          echoCancel: true,
+          noiseSuppress: true,
+        ),
+      );
+      _micSubscription = stream.listen(_onMicChunk);
+      if (!mounted) return;
+      setState(() => _transmit = _TransmitState.transmitting);
+      _log('mic stream active');
+    } catch (e) {
+      _log('startStream failed: $e');
+      // Roll back to idle so the UI doesn't get stuck showing "Transmitting".
+      if (mounted) {
+        setState(() => _transmit = _TransmitState.idle);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not start microphone: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
       }
-    });
-
-    _log('mic stream active');
+    }
   }
 
   /// Stop transmitting.
+  ///
+  /// Defensive: both `_micSubscription.cancel()` and `_recorder.stop()` are
+  /// wrapped in try/catch so a partial-start failure (e.g. mic stream never
+  /// fully attached) can't leave the UI stuck in `stopping`.
   Future<void> _stopTransmit() async {
-    if (!_transmitting) return;
+    if (_transmit != _TransmitState.transmitting &&
+        _transmit != _TransmitState.starting) {
+      return;
+    }
 
-    setState(() => _transmitting = false);
-    _log('PTT stop');
+    setState(() => _transmit = _TransmitState.stopping);
+    _log('PTT stopping');
 
-    await _micSubscription?.cancel();
+    try {
+      await _micSubscription?.cancel();
+    } catch (e) {
+      _log('mic subscription cancel failed: $e');
+    }
     _micSubscription = null;
-    await _recorder.stop();
+
+    try {
+      await _recorder.stop();
+    } catch (e) {
+      _log('recorder stop failed: $e');
+    }
+
+    // Drop any partial frame left in the buffer so the next PTT session
+    // doesn't begin with stale samples.
+    _frameBuffer.clear();
+
+    if (mounted) {
+      setState(() => _transmit = _TransmitState.idle);
+    }
+    _log('PTT stopped');
   }
 
   @override
@@ -174,6 +231,26 @@ class _VoiceScreenState extends State<VoiceScreen>
     _recorder.dispose();
     _player.closePlayer();
     super.dispose();
+  }
+
+  /// True while the mic button should look "hot" (active glow / red colour).
+  /// Covers both the mid-start transient and full transmission so the user
+  /// gets immediate visual feedback when holding the button.
+  bool get _micActive =>
+      _transmit == _TransmitState.starting ||
+      _transmit == _TransmitState.transmitting;
+
+  String get _pttLabel {
+    switch (_transmit) {
+      case _TransmitState.idle:
+        return 'Hold to talk';
+      case _TransmitState.starting:
+        return 'Starting...';
+      case _TransmitState.transmitting:
+        return 'Transmitting...';
+      case _TransmitState.stopping:
+        return 'Stopping...';
+    }
   }
 
   @override
@@ -209,9 +286,43 @@ class _VoiceScreenState extends State<VoiceScreen>
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
+        // Disconnected banner — voice gossip stream ended or errored. The
+        // mic still works (transmits won't fail) but no incoming voice
+        // will arrive, so this needs to be visible.
+        if (!_voiceStreamHealthy)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24)
+                .copyWith(bottom: 16),
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.errorContainer,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.cloud_off,
+                    color: theme.colorScheme.onErrorContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      'Voice stream disconnected — restart the app to reconnect.',
+                      style: TextStyle(
+                        color: theme.colorScheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
         // Receiving indicator
         AnimatedOpacity(
-          opacity: _receiving ? 1.0 : 0.0,
+          opacity: _receiving && _voiceStreamHealthy ? 1.0 : 0.0,
           duration: const Duration(milliseconds: 150),
           child: Padding(
             padding: const EdgeInsets.only(bottom: 32),
@@ -235,14 +346,14 @@ class _VoiceScreenState extends State<VoiceScreen>
           onLongPressEnd: (_) => _stopTransmit(),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 150),
-            width: _transmitting ? 160 : 140,
-            height: _transmitting ? 160 : 140,
+            width: _micActive ? 160 : 140,
+            height: _micActive ? 160 : 140,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: _transmitting
+              color: _micActive
                   ? theme.colorScheme.error
                   : theme.colorScheme.primaryContainer,
-              boxShadow: _transmitting
+              boxShadow: _micActive
                   ? [
                       BoxShadow(
                         color: theme.colorScheme.error.withValues(alpha: 0.4),
@@ -253,9 +364,9 @@ class _VoiceScreenState extends State<VoiceScreen>
                   : [],
             ),
             child: Icon(
-              _transmitting ? Icons.mic : Icons.mic_none,
+              _micActive ? Icons.mic : Icons.mic_none,
               size: 64,
-              color: _transmitting
+              color: _micActive
                   ? theme.colorScheme.onError
                   : theme.colorScheme.onPrimaryContainer,
             ),
@@ -264,9 +375,9 @@ class _VoiceScreenState extends State<VoiceScreen>
 
         const SizedBox(height: 24),
         Text(
-          _transmitting ? 'Transmitting...' : 'Hold to talk',
+          _pttLabel,
           style: theme.textTheme.titleMedium?.copyWith(
-            color: _transmitting
+            color: _micActive
                 ? theme.colorScheme.error
                 : theme.colorScheme.onSurfaceVariant,
           ),
