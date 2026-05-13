@@ -9,12 +9,13 @@ use audiopus::coder::{Decoder as OpusDecoder, Encoder as OpusEncoder};
 use audiopus::packet::Packet as OpusPacket;
 #[cfg(not(target_arch = "wasm32"))]
 use audiopus::{Application, Channels, MutSignals, SampleRate};
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use log::LevelFilter;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
 use crate::frb_generated::StreamSink;
-use crate::node::Node;
+use crate::node::{GossipTopic, Node};
 
 static NODE: OnceLock<Node> = OnceLock::new();
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -140,7 +141,7 @@ pub fn send_message(message: String) -> Result<()> {
             let short_id = node.short_id().await?;
             let payload = format!("{short_id}:{message}");
             log::info!("[api] sending payload: '{payload}'");
-            node.publish("chat", payload.into_bytes()).await?;
+            node.publish(GossipTopic::Chat, payload.into_bytes()).await?;
             Ok::<_, crate::node::NodeError>(())
         }
     };
@@ -165,7 +166,7 @@ pub fn subscribe_chat(sink: StreamSink<String>) -> Result<()> {
 
     let node_ref = node;
     rt().spawn(async move {
-        match node_ref.subscribe("chat").await {
+        match node_ref.subscribe(GossipTopic::Chat).await {
             Ok(mut receiver) => {
                 log::info!("[api] chat subscription established, waiting for messages...");
                 let _ = tx.send(Ok(()));
@@ -209,7 +210,7 @@ pub fn send_sketch(stroke: String) -> Result<()> {
         let result = async {
             let short_id = node_ref.short_id().await?;
             let payload = format!("{short_id}:{stroke}");
-            node_ref.publish("sketch", payload.into_bytes()).await?;
+            node_ref.publish(GossipTopic::Sketch, payload.into_bytes()).await?;
             Ok::<_, crate::node::NodeError>(())
         }
         .await;
@@ -231,7 +232,7 @@ pub fn subscribe_sketch(sink: StreamSink<String>) -> Result<()> {
     let (tx, rx) = oneshot::channel();
     let node_ref = node;
     rt().spawn(async move {
-        match node_ref.subscribe("sketch").await {
+        match node_ref.subscribe(GossipTopic::Sketch).await {
             Ok(mut receiver) => {
                 log::info!("[api] sketch subscription established");
                 let _ = tx.send(Ok(()));
@@ -270,8 +271,16 @@ pub fn start_voice_session() -> Result<()> {
 
     log::info!("[api] start_voice_session: initializing");
 
-    let encoder = OpusEncoder::new(SampleRate::Hz16000, Channels::Mono, Application::Voip)
+    let mut encoder = OpusEncoder::new(SampleRate::Hz16000, Channels::Mono, Application::Voip)
         .map_err(|e| anyhow!("opus encoder: {e}"))?;
+
+    // Enable Discontinuous Transmission (DTX): when the encoder detects silence
+    // it emits 1-2 byte "silence" frames instead of the usual 40-80 bytes. For
+    // PTT use the win is small (you only encode while holding the button) but
+    // it's correct behaviour and matters once voice moves to open-mic.
+    encoder
+        .enable_dtx()
+        .map_err(|e| anyhow!("opus enable_dtx: {e}"))?;
 
     let decoder = OpusDecoder::new(SampleRate::Hz16000, Channels::Mono)
         .map_err(|e| anyhow!("opus decoder: {e}"))?;
@@ -279,7 +288,7 @@ pub fn start_voice_session() -> Result<()> {
     let _ = OPUS_ENCODER.set(Mutex::new(encoder));
     let _ = OPUS_DECODER.set(Mutex::new(decoder));
 
-    log::info!("[api] opus encoder/decoder initialized (16kHz mono, VOIP)");
+    log::info!("[api] opus encoder/decoder initialized (16kHz mono, VOIP, DTX on)");
     Ok(())
 }
 
@@ -328,7 +337,7 @@ pub fn send_voice_frame(pcm_bytes: Vec<u8>) -> Result<()> {
             let mut payload = Vec::with_capacity(VOICE_SENDER_LEN + opus_buf.len());
             payload.extend_from_slice(short_id.as_bytes());
             payload.extend_from_slice(&opus_buf);
-            node_ref.publish("voice", payload).await?;
+            node_ref.publish(GossipTopic::Voice, payload).await?;
             Ok::<_, crate::node::NodeError>(())
         }
         .await;
@@ -365,7 +374,7 @@ pub fn subscribe_voice(sink: StreamSink<Vec<u8>>) -> Result<()> {
             }
         };
 
-        match node_ref.subscribe("voice").await {
+        match node_ref.subscribe(GossipTopic::Voice).await {
             Ok(mut receiver) => {
                 log::info!("[api] voice subscription established");
                 let _ = tx.send(Ok(()));

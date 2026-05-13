@@ -58,7 +58,9 @@ class _VoiceScreenState extends State<VoiceScreen>
         interleaved: true,
         numChannels: 1,
         sampleRate: 16000,
-        bufferSize: 4096,
+        // 1280 bytes = 2x 20ms frames. The previous 4096 (~128ms) consumed
+        // half the real-time-voice latency budget on playback buffering alone.
+        bufferSize: 1280,
       );
       _log('player opened in streaming mode');
 
@@ -101,6 +103,17 @@ class _VoiceScreenState extends State<VoiceScreen>
     final hasPermission = await _recorder.hasPermission();
     if (!hasPermission) {
       _log('microphone permission denied');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Microphone permission is required for voice chat. '
+              'Enable it in Settings.',
+            ),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
       return;
     }
 

@@ -58,6 +58,30 @@ pub fn topic_from_name(name: &str) -> Topic {
     Topic::from(bytes)
 }
 
+/// The closed set of gossip topics used by Panda Playground.
+///
+/// Topics are derived from these variants via `Self::wire_name()` — the wire
+/// name is what flows into `topic_from_name` and becomes the gossip Topic.
+/// Adding a feature that needs its own gossip channel = add a variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GossipTopic {
+    Chat,
+    Sketch,
+    Voice,
+}
+
+impl GossipTopic {
+    /// The on-wire topic name. Changing these strings is a wire-format break;
+    /// peers running an older binary would no longer share topic state.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            GossipTopic::Chat => "chat",
+            GossipTopic::Sketch => "sketch",
+            GossipTopic::Voice => "voice",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum NodeError {
     #[error("network error: {0}")]
@@ -170,12 +194,13 @@ impl Node {
     }
 
     /// Publish a message to a named topic via gossip.
-    pub async fn publish(&self, topic_name: &str, message: Vec<u8>) -> Result<(), NodeError> {
+    pub async fn publish(&self, topic: GossipTopic, message: Vec<u8>) -> Result<(), NodeError> {
         let inner = self.inner.read().await;
         let inner = inner.as_ref().ok_or(NodeError::NotRunning)?;
 
-        let topic = topic_from_name(topic_name);
-        let stream = inner.get_stream(topic).await?;
+        let topic_name = topic.wire_name();
+        let topic_id = topic_from_name(topic_name);
+        let stream = inner.get_stream(topic_id).await?;
 
         log::info!(
             "[gossip] publishing {} bytes to topic '{topic_name}'",
@@ -193,13 +218,14 @@ impl Node {
     /// Subscribe to a named topic. Returns a receiver for incoming messages.
     pub async fn subscribe(
         &self,
-        topic_name: &str,
+        topic: GossipTopic,
     ) -> Result<tokio::sync::mpsc::Receiver<Vec<u8>>, NodeError> {
         let inner = self.inner.read().await;
         let inner = inner.as_ref().ok_or(NodeError::NotRunning)?;
 
-        let topic = topic_from_name(topic_name);
-        let stream = inner.get_stream(topic).await?;
+        let topic_name = topic.wire_name();
+        let topic_id = topic_from_name(topic_name);
+        let stream = inner.get_stream(topic_id).await?;
 
         let mut rx = stream.subscribe();
         let (tx, out_rx) = tokio::sync::mpsc::channel(256);
