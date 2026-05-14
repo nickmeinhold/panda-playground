@@ -75,8 +75,9 @@ fn rt() -> &'static Runtime {
     })
 }
 
-/// Initialize platform-specific logging.
-fn init_logging() {
+/// Initialize platform-specific logging. Idempotent — safe to call from
+/// the Android JNI handshake AND from `start_node` to cover both entry points.
+pub(crate) fn init_logging() {
     #[cfg(target_os = "android")]
     {
         use android_logger::{Config, FilterBuilder};
@@ -87,7 +88,8 @@ fn init_logging() {
                     FilterBuilder::new()
                         .filter(Some("rust_lib_panda_playground"), LevelFilter::Debug)
                         .filter(Some("p2panda"), LevelFilter::Info)
-                        .filter(Some("iroh"), LevelFilter::Warn)
+                        .filter(Some("iroh"), LevelFilter::Info)
+                        .filter(Some("iroh_gossip"), LevelFilter::Debug)
                         .build(),
                 ),
         );
@@ -100,6 +102,34 @@ fn init_logging() {
             .init()
             .ok();
     }
+
+    install_panic_hook();
+}
+
+/// Route Rust panics through the `log` crate so they reach logcat / oslog
+/// instead of being swallowed by Android's stderr-to-/dev/null behaviour.
+///
+/// Idempotent: only the first call installs the hook.
+fn install_panic_hook() {
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown location>".into());
+            let payload = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic payload>");
+            log::error!("[panic] at {location}: {payload}");
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            log::error!("[panic] backtrace:\n{backtrace}");
+        }));
+    });
 }
 
 /// Start the p2panda node with persistent identity stored in `data_dir`.

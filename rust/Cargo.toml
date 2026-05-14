@@ -32,9 +32,16 @@ p2panda-sync = { git = "https://github.com/p2panda/p2panda", rev = "3738fc0fc606
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 audiopus = "0.3.0-rc.0"
 
-# Platform-specific logging
+# Platform-specific logging + JNI bridge.
+# `ndk-context` holds a process-global (JavaVM, Activity) pair that downstream
+# crates (iroh-net's network interface enumerator, mDNS multicast-lock path)
+# reach for to talk to Android system services. Without an explicit init from
+# our Kotlin side, those crates panic with "android context was not initialized"
+# on first network operation. See `android_ndk_context_init` below.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.13.1"
+jni = { version = "0.21", default-features = false }
+ndk-context = "0.1"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 oslog = "0.2"

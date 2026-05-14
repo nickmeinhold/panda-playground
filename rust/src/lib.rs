@@ -3,3 +3,6 @@ mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. This line may not be
 
 pub mod api;
 mod node;
+
+#[cfg(target_os = "android")]
+mod android_init;
